@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b0d11" />
+  <meta name="description" content="Web Bluetooth dashboard for the espstudy ESP32-C3 Pomodoro timer." />
+  <title>POMO · espstudy</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="POMO home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" role="img"><circle cx="16" cy="16" r="13"/><path d="M16 7v9l6 4"/></svg>
+      </span>
+      <span class="brand-copy">
+        <strong>POMO</strong>
+        <small>espstudy · ESP32-C3</small>
+      </span>
+    </a>
+
+    <div class="header-actions">
+      <span id="ble-pill" class="pill pill-off" role="status" aria-live="polite">
+        <i aria-hidden="true"></i><span id="ble-label">Bluetooth off</span>
+      </span>
+      <button id="connect-btn" class="btn btn-primary" type="button">Connect</button>
+      <button id="disconnect-btn" class="btn btn-ghost" type="button" hidden>Disconnect</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="card timer-card" aria-labelledby="timer-heading">
+      <div class="card-head">
+        <div>
+          <p class="eyebrow">Current session</p>
+          <h1 id="timer-heading">Focus timer</h1>
+        </div>
+        <span id="mode-badge" class="badge">FOCUS</span>
+      </div>
+
+      <div class="timer-wrap">
+        <svg class="ring" viewBox="0 0 240 240" aria-hidden="true">
+          <defs>
+            <linearGradient id="ring-gradient" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#ff8a6b"/>
+              <stop offset="100%" stop-color="#ff5a4d"/>
+            </linearGradient>
+          </defs>
+          <circle class="ring-track" cx="120" cy="120" r="104"/>
+          <circle id="ring-progress" class="ring-progress" cx="120" cy="120" r="104"/>
+        </svg>
+        <div class="timer-core">
+          <span id="state-label" class="state-label">READY</span>
+          <output id="countdown" class="countdown" aria-live="off">25:00</output>
+          <span id="session-hint" class="hint">Rotate the encoder to change duration</span>
+        </div>
+      </div>
+
+      <div class="mode-switch" role="group" aria-label="Timer mode">
+        <button class="mode-btn is-active" data-mode="0" type="button">Focus</button>
+        <button class="mode-btn" data-mode="1" type="button">Short break</button>
+        <button class="mode-btn" data-mode="2" type="button">Long break</button>
+      </div>
+
+      <div class="control-row">
+        <button id="toggle-btn" class="btn btn-accent btn-lg" type="button" disabled>
+          <span id="toggle-icon" aria-hidden="true">▶</span><span id="toggle-text">Start</span>
+        </button>
+        <button id="reset-btn" class="btn btn-ghost btn-lg" type="button" disabled>Reset</button>
+        <button id="next-btn" class="btn btn-ghost btn-lg" type="button" disabled>Next mode</button>
+      </div>
+
+      <label class="field" for="task-input">
+        <span>Working on</span>
+        <input id="task-input" type="text" maxlength="80" placeholder="e.g. Write firmware notes" autocomplete="off" />
+        <small>Stored in this browser only — never sent to the device.</small>
+      </label>
+    </section>
+
+    <div class="side-stack">
+      <section class="card stats-card" aria-labelledby="stats-heading">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">Progress</p>
+            <h2 id="stats-heading">Statistics</h2>
+          </div>
+          <button id="refresh-btn" class="icon-btn" type="button" title="Request fresh status" aria-label="Request fresh status" disabled>↻</button>
+        </div>
+
+        <div class="stat-grid">
+          <div class="stat">
+            <span>Sessions</span>
+            <strong id="stat-sessions">0</strong>
+          </div>
+          <div class="stat">
+            <span>Focus minutes</span>
+            <strong id="stat-minutes">0</strong>
+          </div>
+        </div>
+
+        <div class="chart-wrap">
+          <div class="chart-head"><span>This week · Mon–Sun</span><span id="week-total">0 min</span></div>
+          <div id="week-chart" class="chart" role="img" aria-label="Weekly focus minutes chart"></div>
+        </div>
+      </section>
+
+      <section class="card settings-card" aria-labelledby="settings-heading">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">Device preferences</p>
+            <h2 id="settings-heading">Durations</h2>
+          </div>
+        </div>
+
+        <div class="settings-grid">
+          <label class="field" for="set-focus"><span>Focus <small>min</small></span><input id="set-focus" type="number" min="1" max="180" value="25" inputmode="numeric" /></label>
+          <label class="field" for="set-short"><span>Short <small>min</small></span><input id="set-short" type="number" min="1" max="180" value="5" inputmode="numeric" /></label>
+          <label class="field" for="set-long"><span>Long <small>min</small></span><input id="set-long" type="number" min="1" max="180" value="15" inputmode="numeric" /></label>
+        </div>
+
+        <div class="settings-actions">
+          <button id="apply-btn" class="btn btn-primary" type="button" disabled>Apply</button>
+          <button id="clear-btn" class="btn btn-danger-ghost" type="button" disabled>Clear stats</button>
+        </div>
+        <p class="fineprint">Changes are saved in ESP32 preferences and survive power loss.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <span>Local time, Wi-Fi/NTP and timer logic run on the ESP32. This page only displays and commands.</span>
+    <span id="link-status">Waiting for device</span>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="script.js"></script>
+</body>
+</html>

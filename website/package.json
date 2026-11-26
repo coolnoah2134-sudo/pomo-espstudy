@@ -1,0 +1,13 @@
+{
+  "name": "pomo-espstudy-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web Bluetooth dashboard for the espstudy ESP32-C3 Pomodoro timer",
+  "scripts": {
+    "dev": "npx --yes serve . -l 3000",
+    "start": "npx --yes serve . -l 3000"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

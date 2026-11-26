@@ -17,12 +17,13 @@
   --shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html, body { min-height: 100%; }
 
 body {
   margin: 0;
+  overflow-x: hidden;
   background:
     radial-gradient(1100px 620px at 12% -10%, rgba(255, 107, 90, 0.10), transparent 60%),
     radial-gradient(900px 500px at 100% 0%, rgba(127, 179, 200, 0.07), transparent 55%),
@@ -317,18 +318,71 @@ h2 { font-size: 19px; }
   .timer-wrap { width: min(310px, 88vw); }
 }
 
-@media (max-width: 560px) {
-  .topbar { padding: 20px 16px 12px; align-items: flex-start; }
+/* Phones: stack the header, enlarge touch targets, and respect safe areas. */
+@media (max-width: 640px) {
+  .topbar {
+    padding: calc(18px + env(safe-area-inset-top)) 16px 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .brand { justify-content: flex-start; }
   .brand-copy small { font-size: 9px; }
-  .header-actions { gap: 7px; }
-  .pill { padding: 7px 9px; font-size: 11px; }
-  .btn { padding: 9px 12px; font-size: 12px; }
-  .shell { padding: 4px 14px 28px; }
-  .card { padding: 18px; border-radius: 18px; }
-  .control-row { grid-template-columns: 1fr 1fr; }
+  .header-actions { width: 100%; flex-wrap: wrap; gap: 8px; }
+  .pill { flex: 1 1 auto; justify-content: center; min-height: 40px; padding: 8px 10px; font-size: 11px; }
+  .btn, .mode-btn, .icon-btn { min-height: 44px; }
+  .btn { padding: 11px 13px; font-size: 12px; }
+  .shell { padding: 4px 14px calc(28px + env(safe-area-inset-bottom)); gap: 14px; }
+  .card { padding: 18px 16px; border-radius: 18px; }
+  .timer-wrap { width: min(300px, 84vw); }
+  .countdown { font-size: clamp(52px, 17vw, 66px); }
+  .hint { max-width: 220px; font-size: 11px; }
+  .mode-switch { gap: 3px; padding: 4px; }
+  .mode-btn { padding: 10px 4px; font-size: 11px; }
+  .control-row { grid-template-columns: 1fr 1fr; gap: 8px; }
   #toggle-btn { grid-column: 1 / -1; }
-  .settings-grid { grid-template-columns: 1fr; }
-  .footer { padding: 0 14px 24px; }
+  .field input { min-height: 46px; font-size: 16px; } /* prevents iOS zoom-on-focus */
+  .field small { font-size: 11px; }
+  .settings-grid { grid-template-columns: 1fr; gap: 12px; }
+  .stat-grid { gap: 8px; }
+  .stat { padding: 12px; }
+  .stat strong { font-size: 22px; }
+  .chart { gap: 5px; height: 84px; }
+  .bar-label { font-size: 9px; }
+  .settings-actions { gap: 8px; }
+  .footer {
+    padding: 0 16px calc(22px + env(safe-area-inset-bottom));
+    justify-content: center;
+    text-align: center;
+  }
+  .toast { bottom: calc(18px + env(safe-area-inset-bottom)); font-size: 12px; }
+}
+
+@media (max-width: 380px) {
+  .topbar { padding-inline: 12px; }
+  .shell { padding-inline: 10px; }
+  .card { padding: 16px 12px; }
+  .timer-wrap { width: min(270px, 82vw); }
+  .mode-btn { font-size: 10px; }
+  .btn { padding-inline: 10px; }
+  .brand-mark { width: 38px; height: 38px; }
+  .stat strong { font-size: 20px; }
+}
+
+/* Short landscape phones: keep the ring and cards from overflowing vertically. */
+@media (max-height: 640px) and (orientation: landscape) {
+  .topbar { padding-top: calc(10px + env(safe-area-inset-top)); padding-bottom: 8px; }
+  .brand-mark { width: 36px; height: 36px; }
+  .timer-wrap { width: min(220px, 38vh); }
+  .card { padding: 14px; }
+  .shell { gap: 12px; }
+  .chart { height: 66px; }
+}
+
+@media (hover: none) {
+  .btn:hover:not(:disabled),
+  .mode-btn:hover:not(.is-active),
+  .icon-btn:hover:not(:disabled) { transform: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

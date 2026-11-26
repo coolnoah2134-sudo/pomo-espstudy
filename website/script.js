@@ -20,6 +20,9 @@ const FRAME_PAYLOAD = 13;
 const MAX_FRAMES = 16;
 
 const MODE_NAMES = ['FOCUS', 'SHORT BREAK', 'LONG BREAK'];
+const iOSDevice = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const iosWithoutBluetooth = iOSDevice && !navigator.bluetooth;
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const RING_CIRCUMFERENCE = 2 * Math.PI * 104;
 const TASK_KEY = 'pomo.task';
@@ -110,10 +113,12 @@ function renderConnection() {
   else if (connected) setPill('on', `Connected · ${MODE_NAMES[state.mode]}`);
   else setPill('off', 'Bluetooth off');
 
-  ui.linkStatus.textContent = connected ? 'Live device status' : 'Waiting for device';
-  ui.sessionHint.textContent = connected
-    ? 'Device controls the timer — edits stay in sync'
-    : 'Rotate the encoder to change duration';
+  ui.linkStatus.textContent = iosWithoutBluetooth
+    ? 'iPhone: view-only (no Web Bluetooth)'
+    : (connected ? 'Live device status' : 'Waiting for device');
+  ui.sessionHint.textContent = iosWithoutBluetooth
+    ? 'iOS browsers cannot connect over Web Bluetooth'
+    : (connected ? 'Device controls the timer — edits stay in sync' : 'Rotate the encoder to change duration');
 }
 
 function formatTime(totalSeconds) {
@@ -561,3 +566,10 @@ window.setInterval(() => {
 
 buildChart();
 renderAll();
+
+// Cache the dashboard shell so the installed home-screen app opens instantly.
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => { /* offline support is optional */ });
+  });
+}

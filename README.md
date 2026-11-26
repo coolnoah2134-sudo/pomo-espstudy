@@ -217,6 +217,28 @@ npm run dev
 - The user must grant Bluetooth permission via the browser's device picker. This is why the Connect button calls `navigator.bluetooth.requestDevice()` directly from a click handler.
 - The picker requests devices named **espstudy** (and **POMO-C3** for older builds) with the custom service included via `optionalServices`.
 
+### Install it like an app on iPhone / Android
+
+The site is an installable PWA: it has a web app manifest, home-screen icons, standalone display mode, and a small offline shell cache.
+
+**iPhone (Safari):**
+
+1. Open the deployed Vercel URL in Safari.
+2. Tap the **Share** button (square with an arrow).
+3. Tap **Add to Home Screen**.
+4. Name it **POMO** and tap **Add**.
+5. Launch it from the Home Screen — it opens full-screen with its own icon and hides Safari’s UI.
+
+**Android (Chrome):**
+
+1. Open the deployed URL in Chrome.
+2. Tap the three-dot menu → **Install app** / **Add to Home screen**.
+3. Launch it from the app drawer or Home Screen.
+
+Important iOS limitation: Safari and Chrome on iOS are both WebKit-based and **do not support Web Bluetooth**. The installed iPhone app will look and behave like a normal app, and the dashboard/offline shell works, but it cannot connect to `espstudy` over BLE. Android Chrome supports Web Bluetooth, so the PWA works fully there.
+
+For full live Bluetooth control on iPhone, use the native SwiftUI app in [`ios/PomoApp`](ios/PomoApp/README.md). It uses CoreBluetooth, so it works on iPhone where Web Bluetooth does not.
+
 ---
 
 ## Connect and use

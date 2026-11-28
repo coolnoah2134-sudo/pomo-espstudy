@@ -1,6 +1,6 @@
 {
-  "name": "POMO — espstudy",
-  "short_name": "POMO",
+  "name": "espstudy — focus timer",
+  "short_name": "espstudy",
   "description": "Web Bluetooth dashboard for the espstudy ESP32-C3 Pomodoro timer.",
   "start_url": "./",
   "scope": "./",

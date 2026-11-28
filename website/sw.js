@@ -1,9 +1,9 @@
-/* Minimal offline shell cache for the POMO dashboard.
+/* Minimal offline shell cache for the espstudy dashboard.
  * BLE itself still requires a live browser + device connection.
  */
 'use strict';
 
-const CACHE_NAME = 'pomo-shell-v1';
+const CACHE_NAME = 'pomo-shell-v2';
 const APP_SHELL = [
   './',
   './index.html',

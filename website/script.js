@@ -1,37 +1,49 @@
-/* POMO — Web Bluetooth dashboard for the espstudy ESP32-C3 timer.
- * The ESP32 is the single source of truth. The smooth countdown below is a
- * display-only interpolation from the last notification and is re-anchored on
- * every status update from the device.
+/* espstudy — Web Bluetooth dashboard for the ESP32-C3 timer.
+ * Supports both firmware protocols:
+ *   1. Framed BLE  (7b6e… UUIDs, chunked JSON notifications/commands)
+ *   2. JSON BLE    (1234… UUIDs, JSON status char + tick notify + text commands)
+ * The ESP32 remains the source of truth. The smooth countdown is display-only.
  */
 
 'use strict';
 
+// --- Framed protocol (current GitHub firmware + iOS app) -------------------
 const SERVICE_UUID = '7b6e0001-8d2a-4c6f-9a31-5f2c8e4d1000';
 const STATUS_UUID  = '7b6e0002-8d2a-4c6f-9a31-5f2c8e4d1000';
 const COMMAND_UUID = '7b6e0003-8d2a-4c6f-9a31-5f2c8e4d1000';
 
-// Preferred name is espstudy; POMO-C3 is accepted for older firmware.
+// --- JSON protocol (flashed POMO-C3 firmware) ------------------------------
+const JSON_SERVICE_UUID = '12345678-1234-1234-1234-1234567890ab';
+const JSON_STATUS_UUID  = '12345678-1234-1234-1234-1234567890ac';
+const JSON_TICK_UUID    = '12345678-1234-1234-1234-1234567890ad';
+const JSON_COMMAND_UUID = '12345678-1234-1234-1234-1234567890ae';
+
+const ALL_SERVICES = [SERVICE_UUID, JSON_SERVICE_UUID];
+
+// Preferred name is espstudy; POMO-C3 is accepted for the JSON firmware.
 const DEVICE_NAMES = ['espstudy', 'POMO-C3'];
 
-// Must match the firmware framing exactly:
+// Must match the framed firmware framing exactly:
 // [generation, sequence, total, payloadLength] + payload (max 13 bytes).
 const FRAME_HEADER = 4;
 const FRAME_PAYLOAD = 13;
 const MAX_FRAMES = 16;
 
 const MODE_NAMES = ['FOCUS', 'SHORT BREAK', 'LONG BREAK'];
-const iOSDevice = /iP(hone|ad|od)/.test(navigator.userAgent)
+const iosDevice = /iP(hone|ad|od)/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const iosWithoutBluetooth = iOSDevice && !navigator.bluetooth;
+const iosWithoutBluetooth = iosDevice && !navigator.bluetooth;
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const RING_CIRCUMFERENCE = 2 * Math.PI * 104;
 const TASK_KEY = 'pomo.task';
+const GOAL_KEY = 'pomo.dailyGoal';
 
 const $ = (id) => document.getElementById(id);
 
 const ui = {
   blePill: $('ble-pill'),
   bleLabel: $('ble-label'),
+  protocolBadge: $('protocol-badge'),
   connectBtn: $('connect-btn'),
   disconnectBtn: $('disconnect-btn'),
   modeBadge: $('mode-badge'),
@@ -46,11 +58,17 @@ const ui = {
   nextBtn: $('next-btn'),
   refreshBtn: $('refresh-btn'),
   applyBtn: $('apply-btn'),
+  applyHint: $('apply-hint'),
   clearBtn: $('clear-btn'),
   statSessions: $('stat-sessions'),
   statMinutes: $('stat-minutes'),
   weekTotal: $('week-total'),
   weekChart: $('week-chart'),
+  goalLabel: $('goal-label'),
+  goalFill: $('goal-fill'),
+  goalTrack: $('goal-track'),
+  goalInput: $('goal-input'),
+  alertsBtn: $('alerts-btn'),
   taskInput: $('task-input'),
   linkStatus: $('link-status'),
   toast: $('toast'),
@@ -74,6 +92,8 @@ let pendingCommands = 0;
 let device = null;
 let statusChar = null;
 let commandChar = null;
+let tickChar = null;
+let protocol = null; // 'framed' | 'json' | null
 let haveStatus = false;
 let anchorPerf = performance.now();
 let displayRem = state.rem;
@@ -82,8 +102,30 @@ let suppressModeToast = false;
 let commandQueue = Promise.resolve();
 let rx = { gen: null, total: 0, parts: [] };
 let toastTimer = 0;
+let goalMinutes = readGoal();
+let audioContext = null;
 
 ui.ring.style.strokeDasharray = String(RING_CIRCUMFERENCE);
+
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
+function storageGet(key) {
+  try { return window.localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function storageSet(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (_) { /* storage may be disabled */ }
+}
+
+function readGoal() {
+  const value = Number.parseInt(storageGet(GOAL_KEY), 10);
+  return Number.isFinite(value) && value >= 5 && value <= 600 ? value : 120;
+}
+
+function maxDuration() {
+  return protocol === 'json' ? 90 : 180;
+}
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -113,9 +155,18 @@ function renderConnection() {
   else if (connected) setPill('on', `Connected · ${MODE_NAMES[state.mode]}`);
   else setPill('off', 'Bluetooth off');
 
+  ui.protocolBadge.textContent = protocol === 'json'
+    ? 'JSON BLE'
+    : (protocol === 'framed' ? 'Framed BLE' : 'Auto-detect BLE');
+
+  ui.applyHint.textContent = protocol === 'json'
+    ? 'This firmware saves one duration at a time, from 1 to 90 minutes.'
+    : 'Changes are saved in ESP32 preferences and survive power loss.';
+
   ui.linkStatus.textContent = iosWithoutBluetooth
     ? 'iPhone: view-only (no Web Bluetooth)'
-    : (connected ? 'Live device status' : 'Waiting for device');
+    : (connected ? `Live device status · ${protocol}` : 'Waiting for device');
+
   ui.sessionHint.textContent = iosWithoutBluetooth
     ? 'iOS browsers cannot connect over Web Bluetooth'
     : (connected ? 'Device controls the timer — edits stay in sync' : 'Rotate the encoder to change duration');
@@ -126,11 +177,18 @@ function formatTime(totalSeconds) {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
+function formatMinutes(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${String(minutes).padStart(2, '0')}m` : `${minutes}m`;
+}
+
 function renderTimer() {
   const isBreak = state.mode !== 0;
   const total = Math.max(1, state.set);
   const progress = Math.min(1, Math.max(0, 1 - displayRem / total));
 
+  document.body.dataset.mode = String(state.mode);
   ui.countdown.textContent = formatTime(displayRem);
   ui.ring.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - progress));
   ui.ring.classList.toggle('break', isBreak);
@@ -147,13 +205,14 @@ function renderTimer() {
   ui.toggleText.textContent = state.run ? 'Pause' : 'Start';
   ui.toggleIcon.textContent = state.run ? '❚❚' : '▶';
   ui.modeButtons.forEach((button) => {
-    button.classList.toggle('is-active', Number(button.dataset.mode) === state.mode);
-    button.setAttribute('aria-pressed', String(Number(button.dataset.mode) === state.mode));
+    const active = Number(button.dataset.mode) === state.mode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
   });
 
   // Keep the active duration field synced with encoder changes on the device.
   const activeInput = ui.settingInputs[state.mode];
-  const minutes = Math.max(1, Math.min(180, Math.round(state.set / 60)));
+  const minutes = Math.max(1, Math.min(maxDuration(), Math.round(state.set / 60)));
   if (activeInput && document.activeElement !== activeInput) activeInput.value = String(minutes);
 
   if (connected && !connecting && pendingCommands === 0) {
@@ -164,6 +223,7 @@ function renderTimer() {
 function renderStats() {
   ui.statSessions.textContent = String(state.sessions);
   ui.statMinutes.textContent = String(state.minutes);
+  ui.statMinutes.title = formatMinutes(state.minutes);
 
   const weekTotal = state.daily.reduce((sum, value) => sum + value, 0);
   ui.weekTotal.textContent = `${weekTotal} min`;
@@ -179,6 +239,13 @@ function renderStats() {
     bar.title = `${minutes} min`;
     col.setAttribute('aria-label', `Day ${index + 1}: ${minutes} minutes`);
   });
+
+  const today = (new Date().getDay() + 6) % 7;
+  const todayMinutes = state.daily[today] || 0;
+  const percent = Math.min(100, Math.round((todayMinutes / goalMinutes) * 100));
+  ui.goalLabel.textContent = `${todayMinutes} / ${goalMinutes} min`;
+  ui.goalFill.style.width = `${percent}%`;
+  ui.goalTrack.setAttribute('aria-valuenow', String(percent));
 }
 
 function buildChart() {
@@ -215,6 +282,50 @@ function showToast(message, kind = '') {
 }
 
 // ---------------------------------------------------------------------------
+// Completion chime + notification
+// ---------------------------------------------------------------------------
+function ensureAudio() {
+  if (!audioContext) {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return null;
+    try { audioContext = new AudioCtor(); } catch (_) { return null; }
+  }
+  if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+function playChime() {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  [880, 1174.66].forEach((frequency, index) => {
+    const start = now + index * 0.17;
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.16, start + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.38);
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.start(start);
+    oscillator.stop(start + 0.4);
+  });
+}
+
+function handleCompletion() {
+  playChime();
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification('Focus complete', {
+        body: `Nice work. ${MODE_NAMES[state.mode].toLowerCase()} is ready.`,
+      });
+    } catch (_) { /* notifications can be restricted */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // BLE data decoding and status application
 // ---------------------------------------------------------------------------
 function bytesFrom(value) {
@@ -240,23 +351,28 @@ function parseStatusJson(text) {
   try {
     data = JSON.parse(text);
   } catch (error) {
-    console.warn('POMO: ignored malformed status JSON', error);
+    console.warn('espstudy: ignored malformed status JSON', error);
     return;
   }
   if (!isValidStatus(data)) {
-    console.warn('POMO: ignored unexpected status shape', data);
+    console.warn('espstudy: ignored unexpected status shape', data);
     return;
   }
 
-  const previous = haveStatus ? { run: state.run, mode: state.mode, sessions: state.sessions } : null;
+  const previous = haveStatus
+    ? { run: state.run, mode: state.mode, sessions: state.sessions }
+    : null;
+
+  // The framed firmware reports `set` in seconds; the JSON firmware reports minutes.
+  const setSeconds = protocol === 'json' ? data.set * 60 : data.set;
 
   state.mode = data.mode;
   state.rem = Math.max(0, data.rem);
-  state.set = Math.max(1, data.set);
+  state.set = Math.max(1, setSeconds);
   state.run = data.run;
-  state.sessions = data.sessions;
-  state.minutes = data.minutes;
-  state.daily = data.daily.slice();
+  state.sessions = Math.max(0, data.sessions);
+  state.minutes = Math.max(0, data.minutes);
+  state.daily = data.daily.map((v) => Math.max(0, v));
 
   anchorPerf = performance.now();
   displayRem = state.rem;
@@ -268,8 +384,9 @@ function parseStatusJson(text) {
       showToast(`Focus complete — ${next} is ready`, 'success');
     }
   }
-  suppressModeToast = false;
+  if (previous && state.sessions > previous.sessions) handleCompletion();
 
+  suppressModeToast = false;
   renderAll();
 }
 
@@ -315,6 +432,22 @@ function onStatusChanged(event) {
   handleIncoming(event.target.value);
 }
 
+async function onJsonTick() {
+  if (protocol !== 'json' || !connected || !statusChar) return;
+  try {
+    const value = await statusChar.readValue();
+    parseStatusJson(new TextDecoder().decode(bytesFrom(value)));
+  } catch (error) {
+    console.warn('espstudy: JSON status read failed', error);
+  }
+}
+
+async function readJsonStatus() {
+  if (!statusChar) throw new Error('Status characteristic is unavailable.');
+  const value = await statusChar.readValue();
+  parseStatusJson(new TextDecoder().decode(bytesFrom(value)));
+}
+
 // ---------------------------------------------------------------------------
 // Connection lifecycle
 // ---------------------------------------------------------------------------
@@ -328,7 +461,7 @@ function friendlyError(error) {
   if (!error) return 'Unknown Bluetooth error.';
   if (error.message && !error.name) return error.message;
   switch (error.name) {
-    case 'NotFoundError': return 'Device not found, or selection was cancelled. Power on espstudy and try again.';
+    case 'NotFoundError': return 'Device not found, or selection was cancelled. Power on espstudy/POMO-C3 and try again.';
     case 'SecurityError': return 'Bluetooth permission was denied. Allow Bluetooth access and retry.';
     case 'NetworkError': return 'Connection failed. Move closer to the ESP32 and try again.';
     case 'NotSupportedError': return 'This browser cannot use the required BLE features.';
@@ -340,8 +473,13 @@ function cleanupConnection() {
   if (statusChar) {
     try { statusChar.removeEventListener('characteristicvaluechanged', onStatusChanged); } catch (_) { /* ignore */ }
   }
+  if (tickChar) {
+    try { tickChar.removeEventListener('characteristicvaluechanged', onJsonTick); } catch (_) { /* ignore */ }
+  }
   statusChar = null;
   commandChar = null;
+  tickChar = null;
+  protocol = null;
   device = null;
   haveStatus = false;
   rx = { gen: null, total: 0, parts: [] };
@@ -373,41 +511,56 @@ async function connectDevice() {
 
     device = await navigator.bluetooth.requestDevice({
       filters: DEVICE_NAMES.map((name) => ({ name })),
-      optionalServices: [SERVICE_UUID],
+      optionalServices: ALL_SERVICES,
     });
     if (!device) throw new Error('No device was selected.');
 
     device.addEventListener('gattserverdisconnected', onDisconnected);
 
     const server = await device.gatt.connect();
+
     let service;
     try {
       service = await server.getPrimaryService(SERVICE_UUID);
+      protocol = 'framed';
     } catch (_) {
-      throw new Error('Pomodoro BLE service was not found on this device.');
+      try {
+        service = await server.getPrimaryService(JSON_SERVICE_UUID);
+        protocol = 'json';
+      } catch (_) {
+        throw new Error('No supported Pomodoro BLE service was found on this device.');
+      }
     }
 
-    try {
+    if (protocol === 'framed') {
       statusChar = await service.getCharacteristic(STATUS_UUID);
       commandChar = await service.getCharacteristic(COMMAND_UUID);
-    } catch (_) {
-      throw new Error('Required BLE status/command characteristics were not found.');
-    }
-
-    statusChar.addEventListener('characteristicvaluechanged', onStatusChanged);
-    if (typeof statusChar.startNotifications === 'function') {
-      await statusChar.startNotifications();
+      statusChar.addEventListener('characteristicvaluechanged', onStatusChanged);
+      if (typeof statusChar.startNotifications === 'function') {
+        await statusChar.startNotifications();
+      }
+    } else {
+      statusChar = await service.getCharacteristic(JSON_STATUS_UUID);
+      tickChar = await service.getCharacteristic(JSON_TICK_UUID);
+      commandChar = await service.getCharacteristic(JSON_COMMAND_UUID);
+      tickChar.addEventListener('characteristicvaluechanged', onJsonTick);
+      await tickChar.startNotifications();
     }
 
     connected = true;
     renderConnection();
 
     const initial = await statusChar.readValue();
-    handleIncoming(initial);
+    if (protocol === 'json') {
+      parseStatusJson(new TextDecoder().decode(bytesFrom(initial)));
+    } else {
+      handleIncoming(initial);
+    }
     if (!haveStatus) throw new Error('Connected, but no status was received from the device.');
 
     renderAll();
-    showToast(`Connected to ${device.name || 'espstudy'}`, 'success');
+    const label = protocol === 'json' ? 'JSON BLE' : 'Framed BLE';
+    showToast(`Connected to ${device.name || 'espstudy'} · ${label}`, 'success');
   } catch (error) {
     try {
       if (device && device.gatt && device.gatt.connected) device.gatt.disconnect();
@@ -415,7 +568,7 @@ async function connectDevice() {
     connected = false;
     cleanupConnection();
     showToast(friendlyError(error), 'error');
-    console.error('POMO connect failed:', error);
+    console.error('espstudy connect failed:', error);
   } finally {
     connecting = false;
     renderConnection();
@@ -433,8 +586,40 @@ function disconnectDevice() {
 }
 
 // ---------------------------------------------------------------------------
-// Commands (queued so framed writes never interleave)
+// Commands
 // ---------------------------------------------------------------------------
+function jsonCommandFor(payload) {
+  switch (payload.cmd) {
+    case 'start':
+    case 'pause':
+      return 'toggle';
+    case 'reset':
+      return 'reset';
+    case 'mode':
+      return `mode:${Math.max(0, Math.min(2, Number(payload.value) || 0))}`;
+    case 'set': {
+      const value = Math.max(1, Math.min(90, Math.round(Number(payload.value) || 25)));
+      return `set:${value}`;
+    }
+    case 'clearstats':
+      return 'clearstats';
+    default:
+      return null;
+  }
+}
+
+async function writeBytes(bytes) {
+  if (typeof commandChar.writeValueWithResponse === 'function') {
+    await commandChar.writeValueWithResponse(bytes);
+    return;
+  }
+  if (typeof commandChar.writeValueWithoutResponse === 'function') {
+    await commandChar.writeValueWithoutResponse(bytes);
+    return;
+  }
+  await commandChar.writeValue(bytes); // deprecated fallback
+}
+
 function sendCommand(payload) {
   const task = commandQueue.then(async () => {
     if (!connected || !commandChar) throw new Error('Connect to the device first.');
@@ -442,6 +627,17 @@ function sendCommand(payload) {
     pendingCommands += 1;
     renderConnection();
     try {
+      if (protocol === 'json') {
+        if (payload.cmd === 'status') {
+          await readJsonStatus();
+          return;
+        }
+        const text = jsonCommandFor(payload);
+        if (!text) return;
+        await writeBytes(new TextEncoder().encode(text));
+        return;
+      }
+
       const bytes = new TextEncoder().encode(JSON.stringify(payload));
       const total = Math.ceil(bytes.length / FRAME_PAYLOAD);
       if (total < 1 || total > MAX_FRAMES) throw new Error('Command is too long.');
@@ -455,14 +651,7 @@ function sendCommand(payload) {
         frame[2] = total;
         frame[3] = chunk.length;
         frame.set(chunk, FRAME_HEADER);
-
-        if (typeof commandChar.writeValueWithResponse === 'function') {
-          await commandChar.writeValueWithResponse(frame);
-        } else if (typeof commandChar.writeValueWithoutResponse === 'function') {
-          await commandChar.writeValueWithoutResponse(frame);
-        } else {
-          await commandChar.writeValue(frame); // deprecated fallback
-        }
+        await writeBytes(frame);
       }
     } finally {
       pendingCommands -= 1;
@@ -476,13 +665,16 @@ function sendCommand(payload) {
 
 function commandError(error) {
   showToast(friendlyError(error), 'error');
-  console.error('POMO command failed:', error);
+  console.error('espstudy command failed:', error);
 }
 
 // ---------------------------------------------------------------------------
 // UI event handlers
 // ---------------------------------------------------------------------------
-ui.connectBtn.addEventListener('click', connectDevice);
+ui.connectBtn.addEventListener('click', () => {
+  ensureAudio();
+  connectDevice();
+});
 ui.disconnectBtn.addEventListener('click', disconnectDevice);
 
 ui.toggleBtn.addEventListener('click', () => {
@@ -519,15 +711,18 @@ ui.refreshBtn.addEventListener('click', () => {
 });
 
 ui.applyBtn.addEventListener('click', async () => {
+  const limit = maxDuration();
   const values = ui.settingInputs.map((input) => Number(input.value));
-  if (!values.every((value) => Number.isInteger(value) && value >= 1 && value <= 180)) {
-    showToast('Durations must be whole numbers from 1 to 180 minutes.', 'error');
+  if (!values.every((value) => Number.isInteger(value) && value >= 1 && value <= limit)) {
+    showToast(`Durations must be whole numbers from 1 to ${limit} minutes.`, 'error');
     return;
   }
   try {
-    // The firmware accepts an optional "mode" field on "set"; without it the
-    // command applies to the currently selected mode. All three durations can
-    // be saved without switching modes.
+    if (protocol === 'json') {
+      await sendCommand({ cmd: 'set', value: values[state.mode] });
+      showToast('Duration saved on the device', 'success');
+      return;
+    }
     for (let mode = 0; mode < 3; mode += 1) {
       await sendCommand({ cmd: 'set', value: values[mode], mode });
     }
@@ -544,15 +739,49 @@ ui.clearBtn.addEventListener('click', () => {
     .catch(commandError);
 });
 
-try {
-  ui.taskInput.value = window.localStorage.getItem(TASK_KEY) || '';
-} catch (_) { /* storage may be disabled */ }
-
+ui.taskInput.value = storageGet(TASK_KEY) || '';
 ui.taskInput.addEventListener('input', () => {
-  try {
-    window.localStorage.setItem(TASK_KEY, ui.taskInput.value);
-  } catch (_) { /* storage may be disabled */ }
+  storageSet(TASK_KEY, ui.taskInput.value);
 });
+
+ui.goalInput.value = String(goalMinutes);
+ui.goalInput.addEventListener('input', () => {
+  const value = Number.parseInt(ui.goalInput.value, 10);
+  if (!Number.isFinite(value) || value < 5 || value > 600) return;
+  goalMinutes = value;
+  storageSet(GOAL_KEY, String(value));
+  renderStats();
+});
+ui.goalInput.addEventListener('blur', () => {
+  ui.goalInput.value = String(goalMinutes);
+});
+
+function updateAlertsButton() {
+  const granted = 'Notification' in window && Notification.permission === 'granted';
+  ui.alertsBtn.textContent = granted ? 'Alerts enabled' : 'Enable alerts';
+  ui.alertsBtn.disabled = granted;
+}
+
+ui.alertsBtn.addEventListener('click', () => {
+  if (!('Notification' in window)) {
+    showToast('Notifications are not supported in this browser.', 'error');
+    return;
+  }
+  ensureAudio();
+  Notification.requestPermission().then((permission) => {
+    if (permission === 'granted') {
+      updateAlertsButton();
+      showToast('Alerts enabled for completed sessions.', 'success');
+    } else {
+      showToast('Notification permission was blocked.', 'error');
+    }
+  }).catch(() => {
+    showToast('Notification permission is unavailable here.', 'error');
+  });
+});
+
+updateAlertsButton();
+document.addEventListener('pointerdown', () => { ensureAudio(); }, { once: true });
 
 // Display-only smooth countdown, re-anchored by every device notification.
 window.setInterval(() => {
